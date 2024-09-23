@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use postgres_protocol::types;
 use thiserror::Error;
 use tokio_postgres::{
@@ -164,6 +164,25 @@ impl TableRowConverter {
                 } else {
                     let val = row.get::<i64>(i);
                     Cell::I64(val)
+                };
+                Ok(val)
+            }
+            Type::DATE => {
+                let val = if column_schema.nullable {
+                    match row.try_get::<NaiveDate>(i) {
+                        Ok(s) => {
+                            let s = s.format("%Y-%m-%d").to_string();
+                            Cell::TimeStamp(s.to_string())
+                        }
+                        Err(_) => {
+                            //TODO: Only return null if the error is WasNull from tokio_postgres crate
+                            Cell::Null
+                        }
+                    }
+                } else {
+                    let val = row.get::<NaiveDate>(i);
+                    let val = val.format("%Y-%m-%d").to_string();
+                    Cell::TimeStamp(val)
                 };
                 Ok(val)
             }
