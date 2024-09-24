@@ -4,11 +4,14 @@ use std::{
     str::{from_utf8, ParseBoolError, Utf8Error},
 };
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{NaiveDateTime, SecondsFormat};
 use postgres_protocol::message::backend::{
     BeginBody, CommitBody, DeleteBody, InsertBody, LogicalReplicationMessage, RelationBody,
     ReplicationMessage, TupleData, UpdateBody,
 };
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use time::macros::format_description as fd;
 use thiserror::Error;
 use tokio_postgres::types::Type;
 
@@ -41,6 +44,12 @@ pub enum CdcEventConversionError {
 
     #[error("invalid timestamp value")]
     InvalidTimestamp(#[from] chrono::ParseError),
+    
+    #[error("invalid timestamp value")]
+    InvalidTimestampValParse(#[from] time::error::Parse),
+    
+    #[error("invalid timestamp value")]
+    InvalidTimestampValFormat(#[from] time::error::Format),
 
     #[error("unsupported type")]
     UnsupportedType(String),
@@ -113,6 +122,27 @@ impl CdcEventConverter {
                 let val = NaiveDateTime::parse_from_str(val, "%Y-%m-%d %H:%M:%S%.f")?;
                 let val = val.format("%Y-%m-%d %H:%M:%S%.f").to_string();
                 Ok(Cell::TimeStamp(val))
+            }
+            Type::TIMESTAMPTZ => {
+                let val: &str = from_utf8(bytes)?;
+                match val.rsplit_once('+') {
+                    Some(s) => {
+                        if 3 > s.1.len() {
+                            let format = fd!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond][offset_hour sign:mandatory][optional [:[offset_minute]]]");
+                            let val = OffsetDateTime::parse(val, format)?;
+                            let val = val.format(&Rfc3339)?;
+                            Ok(Cell::TimeStamp(val))
+                        } else {
+                            let val = OffsetDateTime::parse(val, &Rfc3339)?;
+                            let val = val.format(&Rfc3339)?;
+                            Ok(Cell::TimeStamp(val))
+                        }
+                    }
+                    None => {
+                        let val = NaiveDateTime::parse_from_str(val, "%Y-%m-%d %H:%M:%S%.f")?;
+                        Ok(Cell::TimeStamp(val.and_utc().to_rfc3339_opts(SecondsFormat::Millis, true)))
+                    }
+                }
             }
             ref typ => Err(CdcEventConversionError::UnsupportedType(typ.to_string())),
         }
