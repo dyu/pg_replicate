@@ -144,7 +144,8 @@ impl CdcEventConverter {
                     }
                 }
             }
-            ref typ => Err(CdcEventConversionError::UnsupportedType(typ.to_string())),
+            _ => Ok(Cell::Bytes(bytes.to_vec())),
+            //ref typ => Err(CdcEventConversionError::UnsupportedType(typ.to_string())),
         }
     }
 
