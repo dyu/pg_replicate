@@ -1,27 +1,23 @@
 use sqlx::PgPool;
 
 pub struct Tenant {
-    pub id: i64,
+    pub id: String,
     pub name: String,
-    pub supabase_project_ref: Option<String>,
-    pub prefix: String,
 }
 
 pub async fn create_tenant(
     pool: &PgPool,
+    tenant_id: &str,
     tenant_name: &str,
-    supabase_project_ref: Option<&str>,
-    prefix: &str,
-) -> Result<i64, sqlx::Error> {
+) -> Result<String, sqlx::Error> {
     let record = sqlx::query!(
         r#"
-        insert into tenants (name, supabase_project_ref, prefix)
-        values ($1, $2, $3)
+        insert into app.tenants (id, name)
+        values ($1, $2)
         returning id
         "#,
+        tenant_id,
         tenant_name,
-        supabase_project_ref,
-        prefix
     )
     .fetch_one(pool)
     .await?;
@@ -29,11 +25,32 @@ pub async fn create_tenant(
     Ok(record.id)
 }
 
-pub async fn read_tenant(pool: &PgPool, tenant_id: i64) -> Result<Option<Tenant>, sqlx::Error> {
+pub async fn create_or_update_tenant(
+    pool: &PgPool,
+    tenant_id: &str,
+    tenant_name: &str,
+) -> Result<String, sqlx::Error> {
     let record = sqlx::query!(
         r#"
-        select id, name, supabase_project_ref, prefix
-        from tenants
+        insert into app.tenants (id, name)
+        values ($1, $2)
+        on conflict (id) do update set name = $2
+        returning id
+        "#,
+        tenant_id,
+        tenant_name,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(record.id)
+}
+
+pub async fn read_tenant(pool: &PgPool, tenant_id: &str) -> Result<Option<Tenant>, sqlx::Error> {
+    let record = sqlx::query!(
+        r#"
+        select id, name
+        from app.tenants
         where id = $1
         "#,
         tenant_id
@@ -44,19 +61,17 @@ pub async fn read_tenant(pool: &PgPool, tenant_id: i64) -> Result<Option<Tenant>
     Ok(record.map(|r| Tenant {
         id: r.id,
         name: r.name,
-        supabase_project_ref: r.supabase_project_ref,
-        prefix: r.prefix,
     }))
 }
 
 pub async fn update_tenant(
     pool: &PgPool,
-    tenant_id: i64,
+    tenant_id: &str,
     tenant_name: &str,
-) -> Result<Option<i64>, sqlx::Error> {
+) -> Result<Option<String>, sqlx::Error> {
     let record = sqlx::query!(
         r#"
-        update tenants
+        update app.tenants
         set name = $1
         where id = $2
         returning id
@@ -70,10 +85,10 @@ pub async fn update_tenant(
     Ok(record.map(|r| r.id))
 }
 
-pub async fn delete_tenant(pool: &PgPool, tenant_id: i64) -> Result<Option<i64>, sqlx::Error> {
+pub async fn delete_tenant(pool: &PgPool, tenant_id: &str) -> Result<Option<String>, sqlx::Error> {
     let record = sqlx::query!(
         r#"
-        delete from tenants
+        delete from app.tenants
         where id = $1
         returning id
         "#,
@@ -88,8 +103,8 @@ pub async fn delete_tenant(pool: &PgPool, tenant_id: i64) -> Result<Option<i64>,
 pub async fn read_all_tenants(pool: &PgPool) -> Result<Vec<Tenant>, sqlx::Error> {
     let mut record = sqlx::query!(
         r#"
-        select id, name, supabase_project_ref, prefix
-        from tenants
+        select id, name
+        from app.tenants
         "#,
     )
     .fetch_all(pool)
@@ -100,8 +115,6 @@ pub async fn read_all_tenants(pool: &PgPool) -> Result<Vec<Tenant>, sqlx::Error>
         .map(|r| Tenant {
             id: r.id,
             name: r.name,
-            supabase_project_ref: r.supabase_project_ref,
-            prefix: r.prefix,
         })
         .collect())
 }

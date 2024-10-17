@@ -1,25 +1,36 @@
 use actix_web::{
     delete, get,
-    http::StatusCode,
-    post,
+    http::{header::ContentType, StatusCode},
+    post, put,
     web::{Data, Json, Path},
     HttpResponse, Responder, ResponseError,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
+use utoipa::ToSchema;
 
-use crate::{db, utils::generate_random_alpha_str};
+use crate::db;
 
-#[derive(Deserialize)]
-struct PostTenantRequest {
+use super::ErrorMessage;
+
+#[derive(Deserialize, ToSchema)]
+pub struct CreateTenantRequest {
+    #[schema(example = "abcdefghijklmnopqrst", required = true)]
+    id: String,
+    #[schema(example = "Tenant Name", required = true)]
     name: String,
-    supabase_project_ref: Option<String>,
 }
 
-#[derive(Serialize)]
-struct PostTenantResponse {
-    id: i64,
+#[derive(Deserialize, ToSchema)]
+pub struct UpdateTenantRequest {
+    #[schema(example = "Tenant Name", required = true)]
+    name: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PostTenantResponse {
+    id: String,
 }
 
 #[derive(Debug, Error)]
@@ -28,90 +39,173 @@ enum TenantError {
     DatabaseError(#[from] sqlx::Error),
 
     #[error("tenant with id {0} not found")]
-    NotFound(i64),
+    TenantNotFound(String),
+}
+
+impl TenantError {
+    fn to_message(&self) -> String {
+        match self {
+            // Do not expose internal database details in error messages
+            TenantError::DatabaseError(_) => "internal server error".to_string(),
+            // Every other message is ok, as they do not divulge sensitive information
+            e => e.to_string(),
+        }
+    }
 }
 
 impl ResponseError for TenantError {
     fn status_code(&self) -> StatusCode {
         match self {
             TenantError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            TenantError::NotFound(_) => StatusCode::NOT_FOUND,
+            TenantError::TenantNotFound(_) => StatusCode::NOT_FOUND,
         }
+    }
+
+    fn error_response(&self) -> HttpResponse {
+        let error_message = ErrorMessage {
+            error: self.to_message(),
+        };
+        let body =
+            serde_json::to_string(&error_message).expect("failed to serialize error message");
+        HttpResponse::build(self.status_code())
+            .insert_header(ContentType::json())
+            .body(body)
     }
 }
 
-#[derive(Serialize)]
-struct GetTenantResponse {
-    id: i64,
+#[derive(Serialize, ToSchema)]
+pub struct GetTenantResponse {
+    #[schema(example = 1)]
+    id: String,
+    #[schema(example = "Tenant name")]
     name: String,
-    supabase_project_ref: Option<String>,
-    prefix: String,
 }
 
+#[utoipa::path(
+    context_path = "/v1",
+    request_body = CreateTenantRequest,
+    responses(
+        (status = 200, description = "Create new tenant", body = PostTenantResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[post("/tenants")]
 pub async fn create_tenant(
     pool: Data<PgPool>,
-    tenant: Json<PostTenantRequest>,
+    tenant: Json<CreateTenantRequest>,
 ) -> Result<impl Responder, TenantError> {
     let tenant = tenant.0;
+    let id = tenant.id;
     let name = tenant.name;
-    let spr = tenant.supabase_project_ref;
-    let id = match spr {
-        Some(spr) => {
-            db::tenants::create_tenant(&pool, &name, Some(spr.as_str()), spr.as_str()).await?
-        }
-        None => {
-            let prefix = generate_random_alpha_str(20);
-            db::tenants::create_tenant(&pool, &name, None, &prefix).await?
-        }
-    };
+    let id = db::tenants::create_tenant(&pool, &id, &name).await?;
     let response = PostTenantResponse { id };
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    context_path = "/v1",
+    request_body = UpdateTenantRequest,
+    responses(
+        (status = 200, description = "Create a new tenant or update an existing one", body = PostTenantResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
+#[put("/tenants/{tenant_id}")]
+pub async fn create_or_update_tenant(
+    pool: Data<PgPool>,
+    tenant_id: Path<String>,
+    tenant: Json<UpdateTenantRequest>,
+) -> Result<impl Responder, TenantError> {
+    let tenant = tenant.0;
+    let tenant_id = tenant_id.into_inner();
+    let name = tenant.name;
+    let id = db::tenants::create_or_update_tenant(&pool, &tenant_id, &name).await?;
+    let response = PostTenantResponse { id };
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    context_path = "/v1",
+    params(
+        ("tenant_id" = i64, Path, description = "Id of the tenant"),
+    ),
+    responses(
+        (status = 200, description = "Return tenant with id = tenant_id", body = GetTenantResponse),
+        (status = 404, description = "Tenant not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/tenants/{tenant_id}")]
 pub async fn read_tenant(
     pool: Data<PgPool>,
-    tenant_id: Path<i64>,
+    tenant_id: Path<String>,
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
-    let response = db::tenants::read_tenant(&pool, tenant_id)
+    let response = db::tenants::read_tenant(&pool, &tenant_id)
         .await?
         .map(|t| GetTenantResponse {
             id: t.id,
             name: t.name,
-            supabase_project_ref: t.supabase_project_ref,
-            prefix: t.prefix,
         })
-        .ok_or(TenantError::NotFound(tenant_id))?;
+        .ok_or(TenantError::TenantNotFound(tenant_id))?;
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    context_path = "/v1",
+    request_body = UpdateTenantRequest,
+    params(
+        ("tenant_id" = i64, Path, description = "Id of the tenant"),
+    ),
+    responses(
+        (status = 200, description = "Update tenant with id = tenant_id"),
+        (status = 404, description = "Tenant not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[post("/tenants/{tenant_id}")]
 pub async fn update_tenant(
     pool: Data<PgPool>,
-    tenant_id: Path<i64>,
-    tenant: Json<PostTenantRequest>,
+    tenant_id: Path<String>,
+    tenant: Json<UpdateTenantRequest>,
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
-    db::tenants::update_tenant(&pool, tenant_id, &tenant.0.name)
+    db::tenants::update_tenant(&pool, &tenant_id, &tenant.0.name)
         .await?
-        .ok_or(TenantError::NotFound(tenant_id))?;
+        .ok_or(TenantError::TenantNotFound(tenant_id))?;
     Ok(HttpResponse::Ok().finish())
 }
 
+#[utoipa::path(
+    context_path = "/v1",
+    params(
+        ("tenant_id" = i64, Path, description = "Id of the tenant"),
+    ),
+    responses(
+        (status = 200, description = "Delete tenant with id = tenant_id"),
+        (status = 404, description = "Tenant not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[delete("/tenants/{tenant_id}")]
 pub async fn delete_tenant(
     pool: Data<PgPool>,
-    tenant_id: Path<i64>,
+    tenant_id: Path<String>,
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
-    db::tenants::delete_tenant(&pool, tenant_id)
+    db::tenants::delete_tenant(&pool, &tenant_id)
         .await?
-        .ok_or(TenantError::NotFound(tenant_id))?;
+        .ok_or(TenantError::TenantNotFound(tenant_id))?;
     Ok(HttpResponse::Ok().finish())
 }
 
+#[utoipa::path(
+    context_path = "/v1",
+    responses(
+        (status = 200, description = "Return all tenants"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/tenants")]
 pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, TenantError> {
     let response: Vec<GetTenantResponse> = db::tenants::read_all_tenants(&pool)
@@ -120,8 +214,6 @@ pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, Tena
         .map(|t| GetTenantResponse {
             id: t.id,
             name: t.name,
-            supabase_project_ref: t.supabase_project_ref,
-            prefix: t.prefix,
         })
         .collect();
     Ok(Json(response))

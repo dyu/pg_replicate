@@ -1,5 +1,7 @@
 use sqlx::PgPool;
 
+use super::replicators::create_replicator_txn;
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PipelineConfig {
     pub config: BatchConfig,
@@ -16,46 +18,55 @@ pub struct BatchConfig {
 
 pub struct Pipeline {
     pub id: i64,
-    pub tenant_id: i64,
+    pub tenant_id: String,
     pub source_id: i64,
     pub sink_id: i64,
+    pub replicator_id: i64,
+    pub publication_name: String,
     pub config: serde_json::Value,
 }
 
 pub async fn create_pipeline(
     pool: &PgPool,
-    tenant_id: i64,
+    tenant_id: &str,
     source_id: i64,
     sink_id: i64,
+    image_id: i64,
+    publication_name: String,
     config: &PipelineConfig,
 ) -> Result<i64, sqlx::Error> {
     let config = serde_json::to_value(config).expect("failed to serialize config");
+    let mut txn = pool.begin().await?;
+    let replicator_id = create_replicator_txn(&mut txn, tenant_id, image_id).await?;
     let record = sqlx::query!(
         r#"
-        insert into pipelines (tenant_id, source_id, sink_id, config)
-        values ($1, $2, $3, $4)
+        insert into app.pipelines (tenant_id, source_id, sink_id, replicator_id, publication_name, config)
+        values ($1, $2, $3, $4, $5, $6)
         returning id
         "#,
         tenant_id,
         source_id,
         sink_id,
+        replicator_id,
+        publication_name,
         config
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *txn)
     .await?;
+    txn.commit().await?;
 
     Ok(record.id)
 }
 
 pub async fn read_pipeline(
     pool: &PgPool,
-    tenant_id: i64,
+    tenant_id: &str,
     pipeline_id: i64,
 ) -> Result<Option<Pipeline>, sqlx::Error> {
     let record = sqlx::query!(
         r#"
-        select id, tenant_id, source_id, sink_id, config
-        from pipelines
+        select id, tenant_id, source_id, sink_id, replicator_id, publication_name, config
+        from app.pipelines
         where tenant_id = $1 and id = $2
         "#,
         tenant_id,
@@ -69,28 +80,32 @@ pub async fn read_pipeline(
         tenant_id: r.tenant_id,
         source_id: r.source_id,
         sink_id: r.sink_id,
+        replicator_id: r.replicator_id,
+        publication_name: r.publication_name,
         config: r.config,
     }))
 }
 
 pub async fn update_pipeline(
     pool: &PgPool,
-    tenant_id: i64,
+    tenant_id: &str,
     pipeline_id: i64,
     source_id: i64,
     sink_id: i64,
+    publication_name: String,
     config: &PipelineConfig,
 ) -> Result<Option<i64>, sqlx::Error> {
     let config = serde_json::to_value(config).expect("failed to serialize config");
     let record = sqlx::query!(
         r#"
-        update pipelines
-        set source_id = $1, sink_id = $2, config = $3
-        where tenant_id = $4 and id = $5
+        update app.pipelines
+        set source_id = $1, sink_id = $2, publication_name = $3, config = $4
+        where tenant_id = $5 and id = $6
         returning id
         "#,
         source_id,
         sink_id,
+        publication_name,
         config,
         tenant_id,
         pipeline_id
@@ -103,12 +118,12 @@ pub async fn update_pipeline(
 
 pub async fn delete_pipeline(
     pool: &PgPool,
-    tenant_id: i64,
+    tenant_id: &str,
     pipeline_id: i64,
 ) -> Result<Option<i64>, sqlx::Error> {
     let record = sqlx::query!(
         r#"
-        delete from pipelines
+        delete from app.pipelines
         where tenant_id = $1 and id = $2
         returning id
         "#,
@@ -123,12 +138,12 @@ pub async fn delete_pipeline(
 
 pub async fn read_all_pipelines(
     pool: &PgPool,
-    tenant_id: i64,
+    tenant_id: &str,
 ) -> Result<Vec<Pipeline>, sqlx::Error> {
     let mut record = sqlx::query!(
         r#"
-        select id, tenant_id, source_id, sink_id, config
-        from pipelines
+        select id, tenant_id, source_id, sink_id, replicator_id, publication_name, config
+        from app.pipelines
         where tenant_id = $1
         "#,
         tenant_id,
@@ -143,6 +158,8 @@ pub async fn read_all_pipelines(
             tenant_id: r.tenant_id,
             source_id: r.source_id,
             sink_id: r.sink_id,
+            replicator_id: r.replicator_id,
+            publication_name: r.publication_name,
             config: r.config,
         })
         .collect())
